@@ -1,0 +1,310 @@
+# GraCE OSDI'26 Artifact: CUDA 12.8 Docker image
+#
+# Build from artifact repo root:
+#   docker build -f docker/Dockerfile.cuda128 -t grace-osdi26:cuda128 .
+#
+# Build fully prebuilt image:
+#   docker build \
+#     -f docker/Dockerfile.cuda128 \
+#     --build-arg BUILD_ARTIFACT=1 \
+#     --build-arg INSTALL_NSYS=1 \
+#     -t grace-osdi26:cuda128-prebuilt .
+#
+# Run:
+#   docker run --rm -it --gpus all --ipc=host \
+#     --ulimit memlock=-1 --ulimit stack=67108864 \
+#     grace-osdi26:cuda128-prebuilt
+
+FROM nvidia/cuda:12.8.0-cudnn-devel-ubuntu22.04
+
+SHELL ["/bin/bash", "-lc"]
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+ARG BUILD_ARTIFACT=0
+ARG INSTALL_NSYS=1
+ARG PIP_INDEX_URL="https://pypi.org/simple"
+
+ARG NSYS_URL="https://developer.download.nvidia.com/devtools/nsight-systems/NsightSystems-linux-public-2023.4.1.97-3355750.run"
+ARG NSYS_ROOT="/opt/nvidia/nsight-systems/2023.4.1"
+
+ARG MINICONDA_DIR="/opt/conda"
+ARG MINICONDA_INSTALLER="Miniconda3-latest-Linux-x86_64.sh"
+
+
+ENV ARTIFACT_ROOT=/workspace/grace-osdi-26-artifact
+
+ENV CUDA_HOME=/usr/local/cuda
+ENV CUDA_SHORT=128
+ENV MAGMA_HOME=/usr/local/magma-cuda128
+ENV USE_MAGMA=1
+
+ENV PATH=/usr/local/cuda/bin:/opt/conda/bin:${PATH}
+ENV CMAKE_PREFIX_PATH=${MAGMA_HOME}:${CMAKE_PREFIX_PATH}
+ENV CPATH=${MAGMA_HOME}/include:${CPATH}
+ENV LIBRARY_PATH=${MAGMA_HOME}/lib:${LIBRARY_PATH}
+ENV LD_LIBRARY_PATH=${MAGMA_HOME}/lib:${LD_LIBRARY_PATH}
+
+# Build CUDA extensions even during docker build, where GPUs are usually not visible.
+ENV FORCE_CUDA=1
+
+# H100 = compute capability 9.0.
+# For broader support, use: 8.0;8.6;9.0
+ARG TORCH_CUDA_ARCH_LIST="9.0"
+ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST}
+
+
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=all
+
+ENV GRACE_CACHE=/opt/grace/cache
+ENV HF_HOME=/opt/grace/cache/huggingface
+ENV TORCH_HOME=/opt/grace/cache/torch
+ENV XDG_CACHE_HOME=/opt/grace/cache/xdg
+ENV TRITON_CACHE_DIR=/opt/grace/cache/triton
+ENV PIP_INDEX_URL=${PIP_INDEX_URL}
+
+ARG MAX_JOBS=32
+ENV MAX_JOBS=${MAX_JOBS}
+ENV CMAKE_BUILD_PARALLEL_LEVEL=${MAX_JOBS}
+
+ENV TORCHINDUCTOR_UNIQUE_KERNEL_NAMES=1
+
+# ----------------------------------------------------------------------
+# 1. System packages
+# ----------------------------------------------------------------------
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bash \
+    git \
+    git-lfs \
+    wget \
+    curl \
+    ca-certificates \
+    build-essential \
+    gcc \
+    g++ \
+    gfortran \
+    make \
+    cmake \
+    pkg-config \
+    rsync \
+    file \
+    less \
+    vim \
+    nano \
+    coreutils \
+    findutils \
+    procps \
+    numactl \
+    zstd \
+    unzip \
+    zip \
+    tar \
+    xz-utils \
+    expect \
+    python3 \
+    python3-pip \
+    python3-venv \
+    libopenblas-dev \
+    liblapack-dev \
+    libgl1 \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender1 \
+    libjpeg-dev \
+    zlib1g-dev \
+    libpng-dev \
+    libsndfile1 \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN git lfs install --system || true
+
+# ----------------------------------------------------------------------
+# 2. Build MAGMA 2.6.1 for CUDA 12.8
+# ----------------------------------------------------------------------
+
+COPY scripts/build_magma_cuda128.sh /tmp/build_magma_cuda128.sh
+
+RUN chmod +x /tmp/build_magma_cuda128.sh && \
+    MAGMA_VERSION=2.6.1 \
+    MAGMA_INSTALL_DIR="${MAGMA_HOME}" \
+    CUDA_HOME="${CUDA_HOME}" \
+    MAX_JOBS="${MAX_JOBS}" \
+    /tmp/build_magma_cuda128.sh && \
+    rm -f /tmp/build_magma_cuda128.sh
+
+RUN echo ">>> MAGMA sanity check" && \
+    test -f "${MAGMA_HOME}/lib/libmagma.a" && \
+    test -f "${MAGMA_HOME}/include/magma.h" && \
+    ls -lh "${MAGMA_HOME}/lib/libmagma.a" && \
+    echo "MAGMA_HOME=${MAGMA_HOME}"
+
+# ----------------------------------------------------------------------
+# 3. Install Miniconda
+# ----------------------------------------------------------------------
+
+RUN if [[ -x "${MINICONDA_DIR}/bin/conda" ]]; then \
+      echo ">>> Miniconda already installed at ${MINICONDA_DIR}"; \
+    else \
+      echo ">>> Installing Miniconda to ${MINICONDA_DIR}"; \
+      rm -rf "${MINICONDA_DIR}"; \
+      mkdir -p "$(dirname "${MINICONDA_DIR}")"; \
+      wget -q "https://repo.anaconda.com/miniconda/${MINICONDA_INSTALLER}" -O "/tmp/${MINICONDA_INSTALLER}"; \
+      bash "/tmp/${MINICONDA_INSTALLER}" -b -p "${MINICONDA_DIR}"; \
+      rm -f "/tmp/${MINICONDA_INSTALLER}"; \
+    fi
+
+ENV CONDA_SH=/opt/conda/etc/profile.d/conda.sh
+
+RUN source "${CONDA_SH}" && \
+    conda config --system --set always_yes yes && \
+    conda config --system --set auto_update_conda false && \
+    conda config --system --add channels conda-forge && \
+    conda config --system --add channels pytorch && \
+    conda config --system --set channel_priority flexible && \
+    conda --version
+
+RUN source "${CONDA_SH}" && \
+    conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main || true && \
+    conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r || true
+
+RUN echo "source ${CONDA_SH}" >> /root/.bashrc && \
+    echo "export CUDA_HOME=${CUDA_HOME}" >> /root/.bashrc && \
+    echo "export CUDA_SHORT=${CUDA_SHORT}" >> /root/.bashrc && \
+    echo "export MAGMA_HOME=${MAGMA_HOME}" >> /root/.bashrc && \
+    echo "export USE_MAGMA=1" >> /root/.bashrc && \
+    echo "export CMAKE_PREFIX_PATH=${MAGMA_HOME}:\${CMAKE_PREFIX_PATH:-}" >> /root/.bashrc && \
+    echo "export CPATH=${MAGMA_HOME}/include:\${CPATH:-}" >> /root/.bashrc && \
+    echo "export LIBRARY_PATH=${MAGMA_HOME}/lib:\${LIBRARY_PATH:-}" >> /root/.bashrc && \
+    echo "export LD_LIBRARY_PATH=${MAGMA_HOME}/lib:\${LD_LIBRARY_PATH:-}" >> /root/.bashrc && \
+    echo "export PATH=${CUDA_HOME}/bin:/opt/conda/bin:\$PATH" >> /root/.bashrc
+
+# ----------------------------------------------------------------------
+# 4. Optional Nsight Systems installation
+# ----------------------------------------------------------------------
+
+COPY scripts/install_nsys.sh /tmp/install_nsys.sh
+
+RUN chmod +x /tmp/install_nsys.sh && \
+    if [[ "${INSTALL_NSYS}" == "1" ]]; then \
+      NSYS_URL="${NSYS_URL}" NSYS_ROOT="${NSYS_ROOT}" /tmp/install_nsys.sh; \
+    else \
+      echo ">>> Skipping Nsight Systems installation because INSTALL_NSYS=${INSTALL_NSYS}"; \
+    fi && \
+    rm -f /tmp/install_nsys.sh
+
+# ----------------------------------------------------------------------
+# 5. Create artifact directories and caches
+# ----------------------------------------------------------------------
+
+RUN mkdir -p \
+    /workspace \
+    "${ARTIFACT_ROOT}" \
+    "${GRACE_CACHE}" \
+    "${HF_HOME}" \
+    "${TORCH_HOME}" \
+    "${XDG_CACHE_HOME}" \
+    "${TRITON_CACHE_DIR}" \
+    "${ARTIFACT_ROOT}/results/raw" \
+    "${ARTIFACT_ROOT}/results/processed" \
+    "${ARTIFACT_ROOT}/figures" \
+    "${ARTIFACT_ROOT}/tables"
+
+WORKDIR ${ARTIFACT_ROOT}
+
+# ----------------------------------------------------------------------
+# 6. Copy artifact repository
+# ----------------------------------------------------------------------
+
+COPY . ${ARTIFACT_ROOT}
+
+RUN test -d "${ARTIFACT_ROOT}/scripts" && \
+    test -d "${ARTIFACT_ROOT}/benchmark_runner" && \
+    test -d "${ARTIFACT_ROOT}/third_party/pytorch" && \
+    test -d "${ARTIFACT_ROOT}/third_party/triton" && \
+    test -d "${ARTIFACT_ROOT}/third_party/torchbenchmark" && \
+    test -f "${ARTIFACT_ROOT}/benchmark_runner/run_workloads.sh" && \
+    test -f "${ARTIFACT_ROOT}/scripts/setup_conda_envs.sh" && \
+    test -f "${ARTIFACT_ROOT}/scripts/build_all_variants.sh" && \
+    test -f "${ARTIFACT_ROOT}/scripts/install_workloads.sh"
+
+RUN if [[ ! -e "${ARTIFACT_ROOT}/third_party/pytorch/setup.py" ]]; then \
+      echo "[ERROR] third_party/pytorch does not look initialized."; \
+      echo "Run: git submodule update --init --recursive"; \
+      exit 1; \
+    fi && \
+    if [[ ! -d "${ARTIFACT_ROOT}/third_party/triton/python" ]]; then \
+      echo "[ERROR] third_party/triton does not look initialized."; \
+      echo "Run: git submodule update --init --recursive"; \
+      exit 1; \
+    fi && \
+    if [[ ! -f "${ARTIFACT_ROOT}/third_party/torchbenchmark/install.py" ]]; then \
+      echo "[ERROR] third_party/torchbenchmark does not look initialized."; \
+      echo "Run: git submodule update --init --recursive"; \
+      exit 1; \
+    fi
+
+RUN chmod +x \
+    ${ARTIFACT_ROOT}/scripts/*.sh \
+    ${ARTIFACT_ROOT}/benchmark_runner/run_workloads.sh || true
+
+# ----------------------------------------------------------------------
+# 7. CUDA sanity check
+# ----------------------------------------------------------------------
+
+RUN echo ">>> CUDA sanity check" && \
+    which nvcc && \
+    nvcc --version && \
+    echo "CUDA_HOME=${CUDA_HOME}" && \
+    ls -l /usr/local/cuda/lib64/libcudart.so* || true
+
+# ----------------------------------------------------------------------
+# 8. Optional full artifact build
+# ----------------------------------------------------------------------
+
+RUN if [[ "${BUILD_ARTIFACT}" == "1" ]]; then \
+      echo ">>> BUILD_ARTIFACT=1: setting up conda envs"; \
+      bash "${ARTIFACT_ROOT}/scripts/setup_conda_envs.sh"; \
+      echo ">>> BUILD_ARTIFACT=1: building all GraCE variants"; \
+      bash "${ARTIFACT_ROOT}/scripts/build_all_variants.sh"; \
+      echo ">>> BUILD_ARTIFACT=1: installing benchmark workloads"; \
+      bash "${ARTIFACT_ROOT}/scripts/install_workloads.sh"; \
+      echo ">>> Cleaning build caches"; \
+      rm -rf "${ARTIFACT_ROOT}/third_party/pytorch/build" || true; \
+      rm -rf /root/.cache/pip || true; \
+      conda clean -afy || true; \
+    else \
+      echo ">>> BUILD_ARTIFACT=0: skipping conda env setup, PyTorch builds, and workload installation."; \
+      echo ">>> To build a prebuilt evaluator image, rebuild with --build-arg BUILD_ARTIFACT=1"; \
+    fi
+
+# ----------------------------------------------------------------------
+# 9. Final image metadata and default command
+# ----------------------------------------------------------------------
+
+RUN printf '%s\n' \
+    "ARTIFACT_ROOT=${ARTIFACT_ROOT}" \
+    "CUDA_HOME=${CUDA_HOME}" \
+    "CUDA_SHORT=${CUDA_SHORT}" \
+    "MAGMA_HOME=${MAGMA_HOME}" \
+    "USE_MAGMA=${USE_MAGMA}" \
+    "CONDA_SH=${CONDA_SH}" \
+    "HF_HOME=${HF_HOME}" \
+    "TORCH_HOME=${TORCH_HOME}" \
+    "XDG_CACHE_HOME=${XDG_CACHE_HOME}" \
+    "TRITON_CACHE_DIR=${TRITON_CACHE_DIR}" \
+    > /etc/grace-artifact-env
+
+RUN printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'set -euo pipefail' \
+    'cat /etc/grace-artifact-env' \
+    > /usr/local/bin/grace-env && \
+    chmod +x /usr/local/bin/grace-env
+
+WORKDIR ${ARTIFACT_ROOT}
+
+CMD ["/bin/bash"]

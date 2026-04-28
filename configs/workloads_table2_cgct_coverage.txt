@@ -1,0 +1,6 @@
+ST      speech_transformer     torchbench  inference 1
+DALLE2  DALLE2_pytorch         torchbench  inference 1
+MMC     torch_multimodal_clip  torchbench  inference 1
+XLNET-T XLNetLMHeadModel       huggingface training 8
+XLNET-I XLNetLMHeadModel       huggingface inference 1
+VM      vision_maskrcnn        torchbench  inference 1

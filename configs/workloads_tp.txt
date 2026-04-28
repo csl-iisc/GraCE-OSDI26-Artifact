@@ -1,0 +1,4 @@
+XLNET-I XLNetLMHeadModel       huggingface inference 128
+DALLE2  DALLE2_pytorch         torchbench  inference 2
+ST      speech_transformer     torchbench  inference 1
+VM      vision_maskrcnn        torchbench  inference 1

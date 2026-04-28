@@ -1,0 +1,12 @@
+[submodule "third_party/pytorch"]
+	path = third_party/pytorch
+	url = https://github.com/Abhishekghosh1998/GraCE-pytorch-osdi26.git
+	branch = osdi26/baseline-pytorch2
+[submodule "third_party/triton"]
+	path = third_party/triton
+	url = https://github.com/Abhishekghosh1998/GraCE-triton-osdi26.git
+	branch = osdi26/grace-indirection
+[submodule "third_party/torchbenchmark"]
+	path = third_party/torchbenchmark
+	url = https://github.com/Abhishekghosh1998/GraCE-torchbenchmark-osdi26.git
+	branch = osdi26/grace-tp-augmentations

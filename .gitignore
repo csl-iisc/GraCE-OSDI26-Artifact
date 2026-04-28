@@ -1,0 +1,23 @@
+docker/.generated/docker_cpuset.env
+docker/.generated/docker_run_pygraph.sh
+
+results/**
+!results/
+!results/.gitkeep
+!results/README.md
+
+figures/**
+!figures/
+!figures/.gitkeep
+!figures/README.md
+
+tables/**
+!tables/
+!tables/.gitkeep
+!tables/README.md
+
+
+# Python bytecode/cache
+__pycache__/
+*.py[cod]
+*$py.class
